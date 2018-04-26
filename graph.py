@@ -66,6 +66,7 @@ edge_draw_settings = {
     'exec': { 'width': 2, 'style': 'dotted', 'color': 'yes' },
     'data_read': { 'width': 2, 'style': 'dashed', 'color': 'yes' },
     'flow': { 'width': 2, 'style': 'filled', 'color': 'no' },
+    'filter': { 'width': 2, 'style': 'filled', 'color': 'no' },
     'proc_trans': { 'width': 3, 'style': 'dashed', 'color': 'no' },
 }
 
@@ -79,7 +80,7 @@ class AGraph(object):
              clusters = [], prog = 'fdp'):
         self.A = pgv.AGraph(directed = True)
         self.A.graph_attr['splines'] = 'line'
-        self.A.node_attr['fixedsize'] = 'true'
+        self.A.node_attr['fixedsize'] = 'false'
         self.A.graph_attr['concentrate'] = 'true'
         self.A.graph_attr['overlap'] = '30:true'
         self.A.graph_attr['K'] = 1.7
@@ -101,7 +102,7 @@ class AGraph(object):
             graph_edges = self.G.edges()
 
         for (u, v) in graph_edges:
-            if not edge_match_tags(self.G, u, v, edge_types):
+            if not edge_match_tags(self.G, u, v, edge_types, []):
                 continue
 
             if only_propagation == True and 'prop_path' not in self.G[u][v]:
@@ -115,7 +116,7 @@ class AGraph(object):
 
         # always display Target and TCB nodes
         for (nodes, name, label) in clusters:
-            if label in ['TCB', 'Target']:
+            if label in ['TCB', 'Target', 'Filtered Objects']:
                 nodes_list.update(nodes)
 
         self.A.add_nodes_from(nodes_list)
@@ -134,9 +135,12 @@ class AGraph(object):
 
             node_label = os.path.basename(n.name)
             if isinstance(n, Subject) or isinstance(n, Object):
-                node_label = selinux_type(n.name[2:])
+                node_label = selinux_type(n.label)
                 if '-#' in n.name:
                     node_label += '-#' + n.name.split('-#')[1]
+
+            if isinstance(n, Object):
+                node_label = selinux_type(n.label) + ':' + selinux_class(n.label)
 
             self.A.get_node(n).attr['label'] = '<<B>%s</B><BR/><B>[%s]' \
                 '</B><BR/> <BR/> <BR/> <BR/> <BR/>>' % \
@@ -153,6 +157,8 @@ class AGraph(object):
             edge.attr['penwidth'] = edge_draw_settings[edge_type]['width'] + 1
             edge.attr['style'] = \
                 edge_draw_settings[edge_type]['style'] + ',bold'
+            if 'filter' in edge_type_list:
+                edge.attr['arrowhead'] = 'tee'
 
         for (nodes, name, label) in clusters:
             if label in ['TCB', 'Target']:

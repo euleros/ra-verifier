@@ -57,30 +57,41 @@ def propagation_rule(status, propagation):
 
 
 def edge_list_tags(graph, source, target):
-    return [tag[9:] for tag in graph[source][target] \
-            if tag.startswith('edge_tag_')]
+    try:
+        return [tag[9:] for tag in graph[source][target] \
+                if tag.startswith('edge_tag_')]
+    except:
+        return []
 
-
-def edge_match_tags(graph, source, target, tags):
+def edge_match_tags(graph, source, target, tags, excluded_tags):
     return tags is None or \
-        len(set(edge_list_tags(graph, source, target)) & set(tags)) > 0
+        len(set(edge_list_tags(graph, source, target)) & set(tags)) > 0 and \
+        len(set(edge_list_tags(graph, source, target)) & set(excluded_tags)) == 0
 
 
-def bfs(g, source, edge_list = None, prop_set = False, only_prop_true = False):
+def bfs(g, source, edge_list = None, prop_set = False, only_prop_true = False, excluded_edge_list = []):
     queue = deque([(None, source)])
     while queue:
         parent, n = queue.popleft()
         yield parent, n
         new = set(g[n])
         queue.extend([(n, child) for child in new
-            if edge_match_tags(g, n, child, edge_list) and (not prop_set or \
+            if edge_match_tags(g, n, child, edge_list, excluded_edge_list) and (not prop_set or \
             ('propagation' in g[n][child] and (not only_prop_true or \
             g[n][child]['propagation'] == True)))])
 
 
+def selinux_context(label):
+    label_split = label.split(':')
+    return ':'.join(label_split[:-1])
+
 def selinux_type(label):
     label_split = label.split(':')
-    if len(label_split) < 4:
-        return label
+    if len(label_split) >= 4:
+        return label_split[2]
 
-    return label_split[2]
+    return label_split[0]
+
+def selinux_class(label):
+    label_split = label.split(':')
+    return label_split[-1]

@@ -38,7 +38,10 @@ from aggregation import *
 from action import *
 from analysis import *
 import networkx as nx
-from suds.client import Client
+try:
+    from suds.client import Client
+except:
+    pass
 from parser import IRParser
 
 
@@ -54,17 +57,20 @@ def main(argv):
     graph_type = 'auto'
     selinux = False
     log_file = None
-    selinux_policy_path = None
+    policy_path = None
     results_dir = '.'
     log_dir = '/var/www/html/OAT/unknown_log'
+    measure_list = None
+    active_processes_path = None
 
     # parse command line
     try:
-        opts, args = getopt.getopt(argv, "hH:K:i:q:vl:a:g:s:r:",
+        opts, args = getopt.getopt(argv, "hH:K:i:q:vl:a:g:s:r:p:",
                                    ["help", "host=", "keyspace=",
                                    "ima-list=", "distribution=",
                                    "verbose", "log_file=", "analysis=",
-                                   "graph_type=", "selinux_policy_path="])
+                                   "graph_type=", "policy_path=",
+                                   "active_processes_path="])
     except getopt.GetoptError:
         usage()
         sys.exit(2)
@@ -90,23 +96,23 @@ def main(argv):
             if arg not in graph_types:
                 print 'Unknown graph type %s' % arg
             graph_type = arg
-        elif opt in ("-s", "--selinux_policy_path"):
-            selinux_policy_path = arg
+        elif opt in ("-s", "--policy_path"):
+            policy_path = arg
         elif opt in ("-r", "--results_dir"):
             results_dir = arg
+        elif opt in ("-p", "--active_processes_path"):
+            active_processes_path = arg
 
 
     distro = os.environ.get('OS', distro)
     analysis = os.environ.get('ANALYSIS', analysis)
     report_url = os.environ.get('URL')
     report_id = int(os.environ.get('IR', 0))
+    report_str = None
 
     # check log file exists or not
-    log_file = '%s/unknown_log_%s' %(log_dir,report_id);
-    if os.path.exists(log_file) is False:
-        set_verbose_mode(True);
-    else:
-        log_file = None;
+    if report_id != 0:
+        log_file = '%s/unknown_log_%s' %(log_dir,report_id);
 
     log_init(log_file)
     Statistics.start_timer()
@@ -115,12 +121,13 @@ def main(argv):
         if report_url is not None and report_id != 0:
             client = Client(report_url)
             report_str = client.service.fetchReport(report_id)
-        else:
+        elif measure_list is not None:
             fd = open(measure_list, 'r')
             report_str = fd.read()
             fd.close()
 
-        IRParser(report_str)
+        if report_str is not None:
+            IRParser(report_str)
     except Exception as e:
         log_error('Error opening IR, %s' % e)
         sys.exit(2)
@@ -167,7 +174,8 @@ def main(argv):
         LSMLabelInodeFlowAction(conn, distro, graph)
     elif graph_type == 'lsm+selinux':
         LSMLabelAggregation(conn, distro, graph)
-        LSMLabelSELinuxAction(conn, distro, graph, selinux_policy_path)
+        LSMLabelSELinuxAction(conn, distro, graph, policy_path,
+                              active_processes_path)
 
     Statistics.set_elapsed_time('time_build_graph')
 
@@ -192,6 +200,7 @@ def main(argv):
     priv_processes_check = True
     target = ''
     tcb = []
+    filter_list = {}
     priv_processes = []
     cert_digest = None
 
@@ -205,6 +214,10 @@ def main(argv):
             tcb = item[offset:].split('|')
         elif item.startswith('target='):
             target = item[offset:]
+        elif item.startswith('filter='):
+            for filter_rule in item[offset:].split('|'):
+                parsed_rule = filter_rule.split(';')
+                filter_list[parsed_rule[0]] = parsed_rule[1:]
         elif item.startswith('draw_graph='):
             draw_graph = eval(item[offset:])
         elif item.startswith('priv_check='):
@@ -283,6 +296,7 @@ def main(argv):
         try:
             a = LoadTimeAnalysis(conn, distro, graph,
                                  target = target, tcb = tcb,
+                                 filter_list = filter_list,
                                  results_dir = results_dir,
                                  report_id = report_id)
 
@@ -309,7 +323,8 @@ def main(argv):
         Statistics.set_elapsed_time('time_load_time_analysis')
 
     if 'run-time' in analysis_name:
-        if IMARecord.default_template() in ['ima', 'ima-ng']:
+        if policy_path is None and \
+          IMARecord.default_template() in ['ima', 'ima-ng']:
             log_error('Run-time analysis is not supported for template %s' %
                       IMARecord.default_template())
             sys.exit(2)
@@ -320,8 +335,10 @@ def main(argv):
 
         try:
             a = RunTimeAnalysis(conn, distro, graph, target = target,
-                                tcb = tcb, results_dir = results_dir,
+                                tcb = tcb, filter_list = filter_list,
+                                results_dir = results_dir,
                                 report_id = report_id)
+            a.write_policy()
         except Exception as e:
             print e
             sys.exit(2)

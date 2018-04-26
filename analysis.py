@@ -62,7 +62,7 @@ class LoadTimeAnalysis(Analysis):
         return edge_types
 
     def __init__(self, conn, distro, graph, target = '', tcb = [],
-                 results_dir = '.', report_id = 0):
+                 filter_list = {}, results_dir = '.', report_id = 0):
         Analysis.__init__(self, 'load-time')
         self.graph = graph
         self.target = target
@@ -165,6 +165,8 @@ class LoadTimeAnalysis(Analysis):
         self.starting_nodes = [obj for obj in Digest.digests_dict.values()
                           if obj.severity_level != 'ok']
         self.starting_nodes += Package.pkg_dict.values()
+        if len(self.starting_nodes) == 0:
+            self.starting_nodes += Object.obj_label_dict.values()
 
     def propagate_errors(self, topic = 'code+data', target_subjs = None):
         LOAD_TIME_EDGES = self.edges_types_by_topic(topic)
@@ -174,7 +176,7 @@ class LoadTimeAnalysis(Analysis):
             self.graph.add_edge(fake_node, node, edge_tag_fake_edge = True)
 
         for parent, child in bfs(self.graph, fake_node,
-                LOAD_TIME_EDGES + ['fake_edge']):
+                LOAD_TIME_EDGES + ['fake_edge'], excluded_edge_list=['data_write']):
             if parent != None and parent != fake_node:
                 if parent.severity_level == 'error':
                     break
@@ -224,7 +226,7 @@ class LoadTimeAnalysis(Analysis):
             self.graph[subj][fake_node]['propagation'] = True
 
         for parent, child in bfs(self.graph.reverse(), fake_node,
-                LOAD_TIME_EDGES + ['fake_edge'], True, only_prop_true):
+                LOAD_TIME_EDGES + ['fake_edge'], True, only_prop_true, ['data_write']):
             if parent != None and parent != fake_node and \
                     hasattr(parent, 'draw'):
                 if only_prop_true is True and \
@@ -239,7 +241,7 @@ class LoadTimeAnalysis(Analysis):
 #            edges_list = self.graph.edges()
 
         g = AGraph(self.graph)
-        g.draw('%s/graph-load-time-%d.svg' % (self.results_dir, self.report_id),
+        g.draw('%s/graph-load-time-%d.png' % (self.results_dir, self.report_id),
                edge_types = LOAD_TIME_EDGES, graph_edges = edges_list)
 
     def extract_level(self, level):
@@ -294,11 +296,51 @@ class LoadTimeAnalysis(Analysis):
 
 
 class RunTimeAnalysis(Analysis):
-    def __init__(self, conn, distro, graph, target = '', tcb = '',
-                 results_dir = '.', report_id = 0):
+    def write_rule(self, fd, fmt, l, d = None):
+        for item in l:
+            subj_list = ''
+            fd.write(fmt %item.label)
+
+            if d is not None:
+                for subj in d[item]:
+                    subj_list += ' subj=%s' %subj.label
+
+                fd.write(subj_list);
+
+            fd.write('\n')
+
+            if item.label.endswith("s0:socket"):
+                new_label = item.label.replace("s0:socket", "s0-s0:c0.c1023:socket")
+                if (Object.get(new_label) in l):
+                    continue
+
+                fd.write(fmt %new_label)
+                if len(subj_list) > 0:
+                    fd.write(subj_list)
+
+                fd.write('\n')
+
+    def write_policy(self):
+        fd = open("infoflow-policy", 'wc')
+        self.write_rule(fd, 'tcb obj=%s', [obj for obj in \
+            self.r['o_target'] - set(self.r['o_filter'].keys())])
+        self.write_rule(fd, 'tcb obj=%s', [obj for obj in \
+            self.r['o_tcb'] - set(self.r['o_filter'].keys())])
+        self.write_rule(fd, 'tcb subj=%s',
+            [subj for subj in self.r['s_target']])
+        self.write_rule(fd, 'tcb subj=%s',
+            [subj for subj in self.r['s_tcb']])
+        self.write_rule(fd, 'filter obj=%s',
+            [obj for obj in set(self.r['o_filter'].keys())],
+            self.r['o_filter'])
+
+        fd.close()
+
+    def __init__(self, conn, distro, graph, target = '', tcb = [],
+                 filter_list = {}, results_dir = '.', report_id = 0):
         Analysis.__init__(self, 'run-time')
         self.graph = graph
-        self.RUN_TIME_EDGES = ['flow']
+        self.RUN_TIME_EDGES = ['flow', 'filter']
         self.results_dir = results_dir
         self.report_id = report_id
 
@@ -315,28 +357,58 @@ class RunTimeAnalysis(Analysis):
         if len(self.r['s_tcb']) < len(tcb):
             raise Exception('One or more TCB subjects not found')
 
+        self.r['o_filter'] = {}
+        for obj_str in filter_list.keys():
+            parsed_obj_str = obj_str.split(':')
+            objs = Object.get_type_class(parsed_obj_str[0], parsed_obj_str[1])
+            for obj in objs:
+                if obj not in self.r['o_filter'].keys():
+                    self.r['o_filter'][obj] = set()
+
+                self.r['o_filter'][obj].update(
+                    set([s for s in Subject.subj_label_dict.values() \
+                    if selinux_type(s.label) in filter_list[obj_str]]))
+
+        for obj in self.r['o_filter'].keys():
+            for filter_subj in self.r['o_filter'][obj]:
+                if filter_subj not in self.r['s_tcb'] and \
+                  filter_subj not in self.r['s_target']:
+                    raise Exception('Filtering subject %s not in the TCB' \
+                                    %filter_subj.label)
+
         self.r['s_no_tcb'] = set([s for s in Subject.subj_label_dict.values() \
             if s not in self.r['s_target'] and s not in self.r['s_tcb']])
 
-        self.r['s_no_tcb']
-        flow_edges = [(u, v) for (u, v, d) in self.graph.edges(data = True) \
-                      if 'edge_tag_flow' in d]
+        flow_edges = set([(u, v) for (u, v, d) in self.graph.edges(data = True) \
+                      if 'edge_tag_flow' in d or 'edge_tag_exec' in d or 'edge_tag_data_read' in d])
 
-        self.r['o_target'] = set([v for (u, v) in flow_edges \
-            if type(v) == Object and u in self.r['s_target']])
-        self.r['o_tcb'] = set([v for (u, v) in flow_edges \
-            if type(v) == Object and u in self.r['s_tcb']])
-        self.r['o_no_tcb'] = set([v for (u, v) in flow_edges \
-            if type(v) == Object and u in self.r['s_no_tcb']])
-        self.r['o_target_conflict'] = set([u for (u, v) in flow_edges \
-            if type(u) == Object and u in self.r['o_no_tcb'] and \
-            v in self.r['s_target']])
-        self.r['o_tcb_conflict'] = set([u for (u, v) in flow_edges \
-            if type(u) == Object and u in self.r['o_no_tcb'] and \
-            v in self.r['s_tcb']])
+        filter_edges = set()
+        for obj in self.r['o_filter'].keys():
+            if len(self.r['o_filter'][obj]):
+                for subj in self.r['o_filter'][obj]:
+                    try:
+                        filter_edges.add((obj, subj))
+                    except:
+                        pass
+            else:
+                for (u, v) in flow_edges.copy():
+                    if u == obj:
+                        filter_edges.add((obj, v))
+
+        conflict_edges = flow_edges - filter_edges
+        self.r['o_target'] = set([u for (u, v) in conflict_edges \
+            if type(u) == Object and v in self.r['s_target']])
+        self.r['o_tcb'] = set([u for (u, v) in conflict_edges \
+            if type(u) == Object and v in self.r['s_tcb']])
+        self.r['o_no_tcb'] = set([u for (u, v) in conflict_edges \
+            if type(u) == Object and v in self.r['s_no_tcb']])
+        self.r['o_target_conflict'] = set([v for (u, v) in conflict_edges \
+            if type(v) == Object and v in self.r['o_target'] and u in self.r['s_no_tcb']])
+        self.r['o_tcb_conflict'] = set([v for (u, v) in conflict_edges \
+            if type(v) == Object and v in self.r['o_tcb']  and u in self.r['s_no_tcb']])
 
         conflict_subjs = set()
-        conflict_objs = self.r['o_tcb_conflict'] | self.r['o_target_conflict']
+        conflict_objs = (self.r['o_tcb_conflict'] | self.r['o_target_conflict'])
         conflicts_sources = self.r['s_no_tcb']
         conflicts_targets = self.r['s_tcb'] | self.r['s_target']
 
@@ -345,8 +417,8 @@ class RunTimeAnalysis(Analysis):
         # display just one conflict
         for conflict_source in conflicts_sources:
             for conflict_target in conflicts_targets:
-                a = set([v for (u, v) in flow_edges if u == conflict_source])
-                b = set([u for (u, v) in flow_edges if v == conflict_target])
+                a = set([v for (u, v) in conflict_edges if u == conflict_source])
+                b = set([u for (u, v) in conflict_edges if v == conflict_target])
                 c = a & b & conflict_objs
 
                 if len(c) > 0:
@@ -354,7 +426,28 @@ class RunTimeAnalysis(Analysis):
                     self.edges_list.append((conflict_source, list(c)[0]))
                     self.edges_list.append((list(c)[0], conflict_target))
 
-        suggested_subjs = '|'.join([s.label.split(':')[2]
+        # display filtering interfaces
+        for obj in self.r['o_filter']:
+            for filter_subj in self.r['o_filter'][obj]:
+                self.edges_list.append((obj, filter_subj))
+                graph.add_edge(obj, filter_subj, edge_tag_filter = True)
+
+            for (u, v) in flow_edges:
+                if u  in self.r['s_no_tcb'] and v == obj:
+                    self.edges_list.append((u, v))
+                    graph.add_edge(obj, v, edge_tag_filter = True)
+
+        for obj in conflict_objs & set(self.r['o_filter'].keys()):
+            subjs = set([v for (u, v) in conflict_edges if u == obj]) - \
+                    self.r['o_filter'][obj]
+            if len(subjs):
+                log_info('Filtering interface: %s, reading subjects %s must be '
+                         'specified' %(obj.label,
+                         ', '.join([s.label for s in subjs])))
+
+            del(self.r['o_filter'][obj])
+
+        suggested_subjs = '|'.join([selinux_type(s.label)
                                     for s in conflict_subjs])
         log_info('Conflicting subjects: %s' % suggested_subjs)
 
@@ -385,8 +478,10 @@ class RunTimeAnalysis(Analysis):
                          'cluster_OUTSIDE_TCB', 'Outside TCB'))
         clusters.append((self.r['o_tcb_conflict'] | self.r['o_target_conflict'],
                          'cluster_CONFLICTS', 'Conflicts'))
+        clusters.append((set(self.r['o_filter'].keys()),
+                         'cluster_FILTERED_OBJECTS', 'Filtered Objects'))
 
-        g.draw('%s/graph-run-time-%d.svg' % (self.results_dir, self.report_id),
+        g.draw('%s/graph-run-time-%d.png' % (self.results_dir, self.report_id),
                edge_types = self.RUN_TIME_EDGES, graph_edges = self.edges_list,
                clusters = clusters)
 
@@ -398,8 +493,8 @@ class RunTimeAnalysis(Analysis):
 
 
 class ProcTransAnalysis(Analysis):
-    def __init__(self, conn, distro, graph, target = '',
-                 results_dir = '.', report_id = 0):
+    def __init__(self, conn, distro, graph, target = '', tcb = [],
+                 filter_list = {}, results_dir = '.', report_id = 0):
         self.graph = graph
         self.results_dir = results_dir
         self.report_id = report_id

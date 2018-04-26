@@ -24,6 +24,7 @@
 
 from log import *
 from subprocess import *
+from util import *
 import os
 
 SELINUX_POLICY_VERSION = 29
@@ -47,23 +48,25 @@ class SELinux(object):
 
         if r[0] == 'allow':
             perm_list = []
-            for perm in r[5:]:
+            for perm in r[3:]:
                 if perm == '{':
                     continue
-                elif perm == '}':
+                elif perm == '};':
                     break
                 else:
                     perm_list.append(perm)
-                    if perm == r[5]:
+                    if perm == r[3]:
                         break
 
             cond_list = []
             if rule_is_cond == True:
                 cond_list = rule[rule.index('[') + 1:rule.index(']')].strip()
 
-            parsed_rule = dict(type = r[0], scontext = r[1], tcontext = r[2],
+            parsed_rule = dict(type = r[0], scontext = r[1],
+                               tcontext = selinux_context(r[2]),
                                permlist = perm_list, condlist = cond_list)
-            parsed_rule['class'] = r[4]
+
+            parsed_rule['class'] = selinux_class(r[2])
         elif r[0] == 'type_transition':
             new_context = r[5]
             if new_context.endswith(';'):
@@ -80,14 +83,17 @@ class SELinux(object):
 
         return parsed_rule
 
-    def type_list(self, type = None):
+    def type_list(self, type = None, cls = None):
+        suffix = ''
+        if cls is not None:
+            suffix = ':' + cls
         try:
-            return self.types[type]
+            return [t + suffix for t in self.types[type]]
         except:
-            return [type]
+            return [type + suffix]
 
     def __init__(self, policy_path = None, use_conditionals = True,
-                 active_processes = []):
+                 active_processes = [], policy_source = 'selinux'):
         self.policy_path = SELINUX_POLICY_PATH_DEFAULT
         if policy_path != None:
             self.policy_path = policy_path
@@ -97,37 +103,56 @@ class SELinux(object):
         self.reads = {}
         self.writes = {}
 
-        # build mapping attribute -> types
-        p = Popen(['seinfo', '-a', '-x', self.policy_path],
-                  stdout = PIPE, stderr = PIPE).communicate()[0].splitlines()
-        for l in p[1:]:
-            r = l.split(' ')
-            if len(r) == 4:
-                attribute = r[3]
-                self.types[attribute] = []
-                continue
-            elif len(r) == 7:
-                self.types[attribute].append(r[6])
+        p = ['\n']
+        if policy_source == 'selinux':
+            p = Popen(['seinfo', '-t', '-x', self.policy_path],
+                stdout = PIPE, stderr = PIPE).communicate()[0].splitlines()
 
-        # build mapping type -> attributes
-        p = Popen(['seinfo', '-t', '-x', self.policy_path],
-                  stdout = PIPE, stderr = PIPE).communicate()[0].splitlines()
         for l in p[1:]:
+            alias = 0
             r = l.split(' ')
-            if len(r) == 4:
-                type = r[3]
-                self.attributes[type] = []
+            if len(r) < 5:
                 continue
-            elif len(r) == 7:
-                self.attributes[type].append(r[6])
+
+            type = r[4]
+            if type[-1] == ',' or type[-1] == ';':
+                type = type[:-1]
+
+            if type not in self.attributes:
+                self.attributes[type] = set()
+
+            aliases = []
+            for attribute in r[5:]:
+                if attribute == 'alias':
+                    alias = 1
+                    continue
+                if alias == 1 and attribute == '{':
+                    continue
+                if alias == 1 and attribute == '};':
+                    alias = 0
+                    continue
+		if alias == 1:
+                    aliases.append(attribute)
+                    continue;
+
+                for t in aliases + [type]:
+                    self.attributes[t].add(attribute[:-1])
+                    if attribute[:-1] not in self.types:
+                        self.types[attribute[:-1]] = set()
+                    self.types[attribute[:-1]].add(t)
 
         conditional_opt = ''
         if use_conditionals == True:
             conditional_opt = 'C'
 
-        # parse all 'allow' rules for 'file' class
-        sesearch_args = ['sesearch', '-SA' + conditional_opt, '-c', 'file',
-                         '-p', 'read,write', self.policy_path]
+        if policy_source == 'selinux':
+            sesearch_args = ['sesearch', '-A',
+                             '-p', 'read,write', self.policy_path]
+        elif policy_source == 'infoflow':
+            sesearch_args = ['cat', self.policy_path]
+        else:
+            return
+
         result = Popen(sesearch_args, stdout = PIPE,
                        stderr = PIPE).communicate()[0].splitlines()
 
@@ -135,16 +160,23 @@ class SELinux(object):
             parsed_rule = self.parse_rule(rule)
             if parsed_rule is None:
                 continue
+            if parsed_rule['class'] in ['dir', 'sock_file', 'lnk_file']:
+                continue
             for subj in self.type_list(parsed_rule['scontext']):
-                if subj not in active_processes:
+                if len(active_processes) > 0 and \
+                  selinux_type(subj) not in active_processes:
                     continue
-                if 'read' in parsed_rule['permlist']:
-                    if subj not in self.writes:
+                if 'read' in parsed_rule['permlist'] or \
+                  'execute' in parsed_rule['permlist'] or \
+                  'execute_notrans' in parsed_rule['permlist']:
+                    if subj not in self.reads:
                         self.reads[subj] = set()
-                    objs_read = self.type_list(parsed_rule['tcontext'])
+                    objs_read = self.type_list(parsed_rule['tcontext'],
+                                               parsed_rule['class'])
                     self.reads[subj].update(objs_read)
                 if 'write' in parsed_rule['permlist']:
                     if subj not in self.writes:
                         self.writes[subj] = set()
-                    objs_written = self.type_list(parsed_rule['tcontext'])
+                    objs_written = self.type_list(parsed_rule['tcontext'],
+                                                  parsed_rule['class'])
                     self.writes[subj].update(objs_written)

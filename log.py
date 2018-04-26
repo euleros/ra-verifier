@@ -39,7 +39,7 @@ def log_init(logfile = None):
 	if fdlog != None:
 		return
 
-	if logfile == None:
+	if logfile is None:
 		fdlog = sys.stdout
 	else:
 		try:

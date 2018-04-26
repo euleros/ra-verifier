@@ -163,19 +163,36 @@ class LSMLabelInodeFlowAction(Action):
 
 
 class LSMLabelSELinuxAction(Action):
-    def __init__(self, conn, distro, graph, selinux_policy_path):
-        subjs = [s.split(':')[2] for s in Subject.subj_label_dict.keys()]
-        s = SELinux(active_processes = subjs, policy_path = selinux_policy_path)
+    def parse_active_processes(self, active_processes_path):
+        fd = open(active_processes_path, 'r')
+        for line in fd.read().split('\n'):
+            if len(line) == 0:
+                continue
+
+            self.subjs.append(selinux_type(line))
+
+        fd.close()
+
+
+    def __init__(self, conn, distro, graph, policy, active_processes_path):
+        policy_source, policy_path = policy.split(':')
+        self.subjs = [selinux_type(s.label) for s in Subject.subj_label_dict.values()]
+
+        if active_processes_path is not None:
+            self.parse_active_processes(active_processes_path)
+
+        s = SELinux(policy_path, True, self.subjs, policy_source)
+
         for subj_label in s.reads:
-            subj = Subject.get_by_type(subj_label)
+            subj = Subject.get(subj_label)
             for obj_label in s.reads[subj_label]:
-                obj = Object.get('undefined_u:undefined_r:%s:undefined_level' %
-                                 obj_label)
-                graph.add_edge(obj, subj, edge_tag_flow = True)
+                obj = Object.get(obj_label)
+                graph.add_edge(obj, subj, edge_tag_flow = True,
+                               edge_tag_data_read = True)
 
         for subj_label in s.writes:
-            subj = Subject.get_by_type(subj_label)
+            subj = Subject.get(subj_label)
             for obj_label in s.writes[subj_label]:
-                obj = Object.get('undefined_u:undefined_r:%s:undefined_level' %
-                                 obj_label)
+                obj = Object.get(obj_label)
                 graph.add_edge(subj, obj, edge_tag_flow = True)
+                graph.add_edge(obj, subj, edge_tag_data_write = True)

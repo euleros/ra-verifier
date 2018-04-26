@@ -23,10 +23,17 @@
 # <http://www.gnu.org/licenses/>.
 
 from util import *
-import pycassa
+try:
+    import pycassa
+    db_available = True
+except:
+    db_available = False
 
 class DBConnection(object):
     def __init__(self, keyspace = None, host_list = None):
+        if db_available is False:
+            return
+
         self.client = pycassa.ConnectionPool(keyspace, host_list,
                                              pool_timeout = -1,
                                              max_retries = -1)
@@ -34,6 +41,9 @@ class DBConnection(object):
     def multiget_query(self, row_keys = [], cf_name = None, distro = "Fedora18",
                        include_cf_test = False, sort_reverse = False):
         query_result = {}
+
+        if db_available is False:
+            return
 
         if distro.startswith('Ubuntu') and cf_name is 'PackagesHistory':
             cf_name += 'DEB'
@@ -59,6 +69,9 @@ class DBConnection(object):
 
     def insert(self, platform, cf_name, pathname, digest_type, digest_string):
         query_result = {}
+
+        if db_available is False:
+            return
 
         cf = pycassa.ColumnFamily(self.client, cf_name)
         try:

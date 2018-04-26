@@ -163,7 +163,6 @@ class IMARecord(object):
         self.digest = Digest.get(self, None, False)
         IMARecord.records.append(self)
 
-
 class Digest(GenericNode):
     digests_dict = {}
     digests_query_done = False
@@ -337,6 +336,13 @@ class Object(GenericNode):
             return cls.obj_label_dict[label]
         except:
             return cls(label)
+
+    @classmethod
+    def get_type_class(cls, type = None, class_str = None):
+        found_objs = [o for o in cls.obj_label_dict.values() \
+                      if selinux_type(o.label) == type and \
+                      selinux_class(o.label) == class_str]
+        return found_objs
 
     def __init__(self, label = None):
         self.label = label
